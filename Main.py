@@ -1,11 +1,14 @@
 import sys
 import time
 import pyvisa
+import os # 确保导入了 os 模块
+
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QGridLayout, QLabel, QLineEdit, QPushButton, QTextEdit,
                              QDoubleSpinBox, QMessageBox, QGroupBox, QSizePolicy, QFrame)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, pyqtSlot, QTimer # 导入 QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, pyqtSlot, QTimer, QUrl # 添加 QUrl
 from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent # 添加此行，用于多媒体播放
 
 # --- 设备工作器 (在独立线程中执行VISA操作) ---
 class DeviceWorker(QObject):
@@ -236,6 +239,20 @@ class UnifiedControllerGUI(QMainWindow):
     DEFAULT_PS_VISA_RESOURCE = 'USB0::0x2EC7::0x6000::803982200797740009::INSTR' 
     DEFAULT_EL_VISA_RESOURCE = 'USB0::0x2EC7::0x8900::803280023806740001::INSTR' 
 
+    # 音效文件路径 (重要：修改此处，使其在打包后也能正确找到)
+    if getattr(sys, 'frozen', False):
+        # 如果是Nuitka/PyInstaller打包的，sys.frozen 为 True，使用 sys.executable 的目录
+        application_path = os.path.dirname(sys.executable)
+    else:
+        # 如果是作为普通Python脚本运行，使用当前文件所在的目录
+        application_path = os.path.dirname(os.path.abspath(__file__))
+
+    # 构建 sound 目录的路径
+    SOUND_DIR = os.path.join(application_path, "sound")
+    ON_SOUND_PATH = os.path.join(SOUND_DIR, "on.mp3")
+    OFF_SOUND_PATH = os.path.join(SOUND_DIR, "off.mp3")
+
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ITECH 设备统一控制器 (IT6000 & IT8902E)")
@@ -259,6 +276,9 @@ class UnifiedControllerGUI(QMainWindow):
         self._el_voltage_label_original_class = "measurement_value"
         self._el_current_label_original_class = "measurement_value"
         self._el_power_label_original_class = "measurement_value"
+
+        # 初始化 QMediaPlayer
+        self.media_player = QMediaPlayer()
 
         self.init_ui()
         self.apply_stylesheet()
@@ -432,7 +452,7 @@ class UnifiedControllerGUI(QMainWindow):
 
         ps_grid.addWidget(QLabel("设定电压 (V):"), 0, 0, Qt.AlignRight)
         self.ps_voltage_spinbox = QDoubleSpinBox()
-        self.ps_voltage_spinbox.setRange(0, 60.0) # 根据IT6000型号调整
+        self.ps_voltage_spinbox.setRange(0, 500.0) # 根据IT6000型号调整
         self.ps_voltage_spinbox.setDecimals(3)
         self.ps_voltage_spinbox.setValue(self.ps_voltage_default_on_connect)
         ps_grid.addWidget(self.ps_voltage_spinbox, 0, 1)
@@ -668,6 +688,22 @@ class UnifiedControllerGUI(QMainWindow):
         label.setProperty("class", original_class) # 重新应用原始的类属性
         label.style().polish(label) # 强制重新计算和应用QSS规则
 
+    def play_sound(self, file_path):
+        """播放指定的音效文件。"""
+        if not os.path.exists(file_path):
+            self.log_message(f"<font color='#FFC107'>警告:</font> 音效文件未找到: {file_path}")
+            return
+        
+        url = QUrl.fromLocalFile(file_path)
+        content = QMediaContent(url)
+        
+        if content.isNull():
+            self.log_message(f"<font color='#FFC107'>警告:</font> 无法加载或解析音效文件内容: {file_path}")
+            return
+
+        self.media_player.setMedia(content)
+        self.media_player.play()
+        self.log_message(f"<font color='#666666'>播放音效: {os.path.basename(file_path)}</font>")
 
     # --- 电源 (PS) 特定功能 ---
     def toggle_ps_connection(self):
@@ -862,7 +898,9 @@ class UnifiedControllerGUI(QMainWindow):
             if reply == QMessageBox.No:
                 self.log_message("<font color='#FFC107'>警告:</font> 电源: 用户取消了打开输出操作。") # 警告色
                 return
-        # 关闭输出不再确认，直接执行
+            self.play_sound(self.ON_SOUND_PATH) # 播放开启动效
+        else: # 关闭输出不再确认，直接执行
+            self.play_sound(self.OFF_SOUND_PATH) # 播放关启动效
         
         command_param = "ON" if state_on else "OFF"
         self.ps_command_request.emit("OUTP", command_param, False, "set_output_state")
@@ -1090,7 +1128,9 @@ class UnifiedControllerGUI(QMainWindow):
             if reply == QMessageBox.No:
                 self.log_message("<font color='#FFC107'>警告:</font> 电子负载: 用户取消了打开输入操作。") # 警告色
                 return
-        # 关闭输入不再确认，直接执行
+            self.play_sound(self.ON_SOUND_PATH) # 播放开启动效
+        else: # 关闭输入不再确认，直接执行
+            self.play_sound(self.OFF_SOUND_PATH) # 播放关启动效
 
         command_param = "ON" if state_on else "OFF"
         self.el_command_request.emit("INP", command_param, False, "set_input_state")
