@@ -1,14 +1,14 @@
 import sys
 import time
 import pyvisa
-import os # 确保导入了 os 模块
+import os 
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QGridLayout, QLabel, QLineEdit, QPushButton, QTextEdit,
                              QDoubleSpinBox, QMessageBox, QGroupBox, QSizePolicy, QFrame)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, pyqtSlot, QTimer, QUrl # 添加 QUrl
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, pyqtSlot, QTimer, QUrl, QSettings 
 from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent # 添加此行，用于多媒体播放
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent 
 
 # --- 设备工作器 (在独立线程中执行VISA操作) ---
 class DeviceWorker(QObject):
@@ -162,7 +162,7 @@ class DeviceWorker(QObject):
             self.error.emit(self.device_name, f"{self.device_name} 数据解析错误", f"无法解析设备响应: {response}")
         except Exception as e:
             err_msg = f"执行 '{full_command}' 时发生未知错误: {e}"
-            self.log_message_signal.emit(f"<font color='#DC3545'>错误:</font> {self.device_name} 命令 ({full_command}) 未知错误: {e}</font>") # 错误色
+            self.log_message_signal.emit(f"<font color='#DC3545'>错误:</font> {err_msg}") # 错误色
             self.error.emit(self.device_name, f"{self.device_name} 未知错误", err_msg)
 
     @pyqtSlot()
@@ -236,8 +236,13 @@ class UnifiedControllerGUI(QMainWindow):
     el_command_request = pyqtSignal(str, str, bool, str)
     el_refresh_request = pyqtSignal()
 
+    # 默认VISA资源字符串 (如果 QSettings 没有找到，则使用这些默认值)
     DEFAULT_PS_VISA_RESOURCE = 'USB0::0x2EC7::0x6000::803982200797740009::INSTR' 
     DEFAULT_EL_VISA_RESOURCE = 'USB0::0x2EC7::0x8900::803280023806740001::INSTR' 
+    DEFAULT_PS_VOLTAGE = 1.0
+    DEFAULT_PS_CURRENT = 0.1
+    DEFAULT_EL_CURRENT = 1.0
+
 
     # 音效文件路径 (重要：修改此处，使其在打包后也能正确找到)
     if getattr(sys, 'frozen', False):
@@ -264,10 +269,10 @@ class UnifiedControllerGUI(QMainWindow):
         self.el_worker = None
         self.el_thread = None
 
-        self.ps_voltage_default_on_connect = 1.0
-        self.ps_current_limit_default_on_connect = 0.1
-        self.el_current_default_on_connect = 1.0
-
+        # 初始化 QSettings
+        # 使用公司名和应用程序名来确保配置的唯一性
+        self.settings = QSettings("YourCompanyName", "ITECHUnifiedController")
+        
         # Store original class properties for measurement labels for flashing
         # 这些将用于在闪烁后恢复标签的原始QSS类样式（包括警告色）
         self._ps_voltage_label_original_class = "measurement_value"
@@ -280,9 +285,45 @@ class UnifiedControllerGUI(QMainWindow):
         # 初始化 QMediaPlayer
         self.media_player = QMediaPlayer()
 
-        self.init_ui()
+        self.init_ui() # 先初始化UI，确保所有控件都已创建
+
+        # 在UI初始化完成后再加载设置，此时 status_log_edit 已经存在
+        self.load_settings() 
         self.apply_stylesheet()
         self.log_message("<font color='#666666'>应用程序已启动。</font> 请连接设备。") # 普通日志颜色
+
+    def load_settings(self):
+        """从QSettings加载保存的配置。"""
+        # 从设置中获取并设置到UI元素
+        self.ps_visa_entry.setText(self.settings.value("ps_visa_resource", self.DEFAULT_PS_VISA_RESOURCE))
+        self.el_visa_entry.setText(self.settings.value("el_visa_resource", self.DEFAULT_EL_VISA_RESOURCE))
+        
+        try:
+            self.ps_voltage_spinbox.setValue(float(self.settings.value("ps_voltage_default_on_connect", str(self.DEFAULT_PS_VOLTAGE))))
+        except ValueError:
+            self.ps_voltage_spinbox.setValue(self.DEFAULT_PS_VOLTAGE)
+        
+        try:
+            self.ps_current_limit_spinbox.setValue(float(self.settings.value("ps_current_limit_default_on_connect", str(self.DEFAULT_PS_CURRENT))))
+        except ValueError:
+            self.ps_current_limit_spinbox.setValue(self.DEFAULT_PS_CURRENT)
+
+        try:
+            self.el_current_spinbox.setValue(float(self.settings.value("el_current_default_on_connect", str(self.DEFAULT_EL_CURRENT))))
+        except ValueError:
+            self.el_current_spinbox.setValue(self.DEFAULT_EL_CURRENT)
+
+        self.log_message("<font color='#666666'>已加载用户设置。</font>") # 普通日志颜色
+
+
+    def save_settings(self):
+        """将当前配置保存到QSettings。"""
+        self.settings.setValue("ps_visa_resource", self.ps_visa_entry.text())
+        self.settings.setValue("el_visa_resource", self.el_visa_entry.text())
+        self.settings.setValue("ps_voltage_default_on_connect", self.ps_voltage_spinbox.value())
+        self.settings.setValue("ps_current_limit_default_on_connect", self.ps_current_limit_spinbox.value())
+        self.settings.setValue("el_current_default_on_connect", self.el_current_spinbox.value())
+        self.log_message("<font color='#666666'>用户设置已保存。</font>") # 普通日志颜色
 
     def apply_stylesheet(self):
         """应用新的浅色主题和现代化UI样式。"""
@@ -416,7 +457,8 @@ class UnifiedControllerGUI(QMainWindow):
 
         # 电源连接区域
         connection_layout.addWidget(QLabel("电源 VISA 地址:"), 0, 0, Qt.AlignRight)
-        self.ps_visa_entry = QLineEdit(self.DEFAULT_PS_VISA_RESOURCE)
+        # 此时先用默认值初始化，稍后由 load_settings 填充
+        self.ps_visa_entry = QLineEdit(self.DEFAULT_PS_VISA_RESOURCE) 
         connection_layout.addWidget(self.ps_visa_entry, 0, 1)
         self.ps_connect_button = QPushButton("连接电源")
         self.ps_connect_button.clicked.connect(self.toggle_ps_connection)
@@ -427,7 +469,8 @@ class UnifiedControllerGUI(QMainWindow):
 
         # 电子负载连接区域
         connection_layout.addWidget(QLabel("负载 VISA 地址:"), 2, 0, Qt.AlignRight)
-        self.el_visa_entry = QLineEdit(self.DEFAULT_EL_VISA_RESOURCE)
+        # 此时先用默认值初始化，稍后由 load_settings 填充
+        self.el_visa_entry = QLineEdit(self.DEFAULT_EL_VISA_RESOURCE) 
         connection_layout.addWidget(self.el_visa_entry, 2, 1)
         self.el_connect_button = QPushButton("连接负载")
         self.el_connect_button.clicked.connect(self.toggle_el_connection)
@@ -435,6 +478,11 @@ class UnifiedControllerGUI(QMainWindow):
         
         self.el_idn_label = QLabel("电子负载 IDN: 未连接")
         connection_layout.addWidget(self.el_idn_label, 3, 0, 1, 3)
+
+        # VISA 资源扫描按钮
+        self.scan_visa_button = QPushButton("扫描 VISA 资源")
+        self.scan_visa_button.clicked.connect(self.scan_visa_resources)
+        connection_layout.addWidget(self.scan_visa_button, 4, 0, 1, 3) # 占据整行
         
         connection_panel.setLayout(connection_layout)
         main_layout.addWidget(connection_panel)
@@ -454,7 +502,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.ps_voltage_spinbox = QDoubleSpinBox()
         self.ps_voltage_spinbox.setRange(0, 500.0) # 根据IT6000型号调整
         self.ps_voltage_spinbox.setDecimals(3)
-        self.ps_voltage_spinbox.setValue(self.ps_voltage_default_on_connect)
+        self.ps_voltage_spinbox.setValue(self.DEFAULT_PS_VOLTAGE) # 初始使用默认值
         ps_grid.addWidget(self.ps_voltage_spinbox, 0, 1)
         self.ps_set_voltage_button = QPushButton("设定电压")
         self.ps_set_voltage_button.clicked.connect(self.set_ps_voltage)
@@ -464,7 +512,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.ps_current_limit_spinbox = QDoubleSpinBox()
         self.ps_current_limit_spinbox.setRange(0, 180.0) # 根据IT6000型号调整 (例如IT6018B是180A)
         self.ps_current_limit_spinbox.setDecimals(3)
-        self.ps_current_limit_spinbox.setValue(self.ps_current_limit_default_on_connect)
+        self.ps_current_limit_spinbox.setValue(self.DEFAULT_PS_CURRENT) # 初始使用默认值
         ps_grid.addWidget(self.ps_current_limit_spinbox, 1, 1)
         self.ps_set_current_limit_button = QPushButton("设定电流上限")
         self.ps_set_current_limit_button.clicked.connect(self.set_ps_current_limit)
@@ -530,7 +578,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.el_current_spinbox = QDoubleSpinBox()
         self.el_current_spinbox.setRange(0, 240.0)  # 根据IT8902E型号调整 (例如240A)
         self.el_current_spinbox.setDecimals(3)
-        self.el_current_spinbox.setValue(self.el_current_default_on_connect)
+        self.el_current_spinbox.setValue(self.DEFAULT_EL_CURRENT) # 初始使用默认值
         el_grid.addWidget(self.el_current_spinbox, 0, 1)
         self.el_set_current_button = QPushButton("设定负载电流")
         self.el_set_current_button.clicked.connect(self.set_el_current)
@@ -591,7 +639,7 @@ class UnifiedControllerGUI(QMainWindow):
         log_group = QGroupBox("状态日志")
         log_layout = QVBoxLayout()
         log_layout.setContentsMargins(20, 30, 20, 20)
-        self.status_log_edit = QTextEdit()
+        self.status_log_edit = QTextEdit() # 在这里创建 status_log_edit
         self.status_log_edit.setReadOnly(True)
         log_layout.addWidget(self.status_log_edit)
         log_group.setLayout(log_layout)
@@ -610,8 +658,14 @@ class UnifiedControllerGUI(QMainWindow):
     def log_message(self, message):
         """在状态日志文本框中添加时间戳消息。"""
         timestamp = time.strftime('<font color="#666666">%H:%M:%S</font>') # 时间戳颜色
-        self.status_log_edit.append(f"{timestamp} - {message}")
-        self.status_log_edit.ensureCursorVisible() # 自动滚动到最新消息
+        # 确保 self.status_log_edit 在调用此方法时已存在
+        if hasattr(self, 'status_log_edit') and self.status_log_edit is not None:
+            self.status_log_edit.append(f"{timestamp} - {message}")
+            self.status_log_edit.ensureCursorVisible() # 自动滚动到最新消息
+        else:
+            # 如果在UI完全初始化前调用，可以暂时打印到控制台
+            print(f"LOG (pre-UI): {timestamp} - {message}")
+
 
     def update_status_indicator(self, indicator_label: QLabel, status: str):
         """更新状态指示器的颜色和文本，并处理连接中的脉动效果。"""
@@ -705,6 +759,23 @@ class UnifiedControllerGUI(QMainWindow):
         self.media_player.play()
         self.log_message(f"<font color='#666666'>播放音效: {os.path.basename(file_path)}</font>")
 
+    def scan_visa_resources(self):
+        """扫描并列出所有可用的VISA资源。"""
+        self.log_message("<font color='#17A2B8'>正在扫描可用的 VISA 资源...</font>") # 信息色
+        try:
+            resources = self.rm.list_resources()
+            if resources:
+                self.log_message("<font color='#28A745'>扫描完成！以下是可用的 VISA 资源:</font>") # 成功色
+                for r in resources:
+                    self.log_message(f"  - <font color='#20B2AA'>{r}</font>") # 偏青色
+                self.log_message("<font color='#666666'>请将需要的地址复制到输入框中。</font>")
+            else:
+                self.log_message("<font color='#FFC107'>未找到任何 VISA 资源。请确保 VISA 驱动已正确安装并设备已连接。</font>") # 警告色
+        except Exception as e:
+            self.log_message(f"<font color='#DC3545'>扫描 VISA 资源时发生错误: {e}</font>") # 错误色
+            QMessageBox.critical(self, "VISA 扫描错误", 
+                                 f"扫描 VISA 资源时发生错误: {e}\n\n请确认PyVISA后端已正确配置，并且设备驱动已安装。")
+
     # --- 电源 (PS) 特定功能 ---
     def toggle_ps_connection(self):
         """根据当前连接状态切换电源的连接/断开。"""
@@ -716,8 +787,8 @@ class UnifiedControllerGUI(QMainWindow):
     def connect_ps(self):
         """启动线程连接电源设备。"""
         visa_resource = self.ps_visa_entry.text().strip()
-        if not visa_resource or "USB0::" not in visa_resource: # 简单校验格式
-            QMessageBox.critical(self, "连接错误", "请输入有效的电源 VISA 资源名称 (例如 'USB0::0x...::INSTR')。")
+        if not visa_resource:
+            QMessageBox.critical(self, "连接错误", "请输入有效的电源 VISA 资源名称。")
             return
 
         self.ps_connect_button.setEnabled(False)
@@ -727,7 +798,8 @@ class UnifiedControllerGUI(QMainWindow):
 
         # 初始化并启动工作线程
         self.ps_thread = QThread()
-        self.ps_worker = DeviceWorker(self.rm, visa_resource, "电源")
+        # 传入从UI获取的VISA资源字符串
+        self.ps_worker = DeviceWorker(self.rm, visa_resource, "电源") 
         self.ps_worker.moveToThread(self.ps_thread)
 
         # 连接工作器信号到GUI槽
@@ -759,8 +831,9 @@ class UnifiedControllerGUI(QMainWindow):
         self.set_ps_controls_enabled(True)
         # 初始设定并刷新状态
         # 这些操作现在通过信号发送到工作线程，避免GUI阻塞
-        self.ps_command_request.emit("VOLT", str(self.ps_voltage_default_on_connect), False, "set_initial_volt")
-        self.ps_command_request.emit("CURR", str(self.ps_current_limit_default_on_connect), False, "set_initial_curr")
+        # 使用UI中的值进行初始化，这些值已经由 load_settings 加载
+        self.ps_command_request.emit("VOLT", str(self.ps_voltage_spinbox.value()), False, "set_initial_volt")
+        self.ps_command_request.emit("CURR", str(self.ps_current_limit_spinbox.value()), False, "set_initial_curr")
         # 触发一次全面刷新以获取所有当前状态
         self.ps_refresh_request.emit()
         self.ps_connect_button.setEnabled(True)
@@ -974,8 +1047,8 @@ class UnifiedControllerGUI(QMainWindow):
     def connect_el(self):
         """启动线程连接电子负载设备。"""
         visa_resource = self.el_visa_entry.text().strip()
-        if not visa_resource or "USB0::" not in visa_resource:
-            QMessageBox.critical(self, "连接错误", "请输入有效的电子负载 VISA 资源名称 (例如 'USB0::0x...::INSTR')。")
+        if not visa_resource:
+            QMessageBox.critical(self, "连接错误", "请输入有效的电子负载 VISA 资源名称。")
             return
         
         self.el_connect_button.setEnabled(False)
@@ -984,6 +1057,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.el_input_status_label.setText("连接中...")
 
         self.el_thread = QThread()
+        # 传入从UI获取的VISA资源字符串
         self.el_worker = DeviceWorker(self.rm, visa_resource, "电子负载")
         self.el_worker.moveToThread(self.el_thread)
 
@@ -1015,7 +1089,8 @@ class UnifiedControllerGUI(QMainWindow):
         self.el_visa_entry.setEnabled(False)
         self.set_el_controls_enabled(True)
         # 初始设定并刷新状态
-        self.el_command_request.emit("CURR", str(self.el_current_default_on_connect), False, "set_initial_curr")
+        # 使用UI中的值进行初始化，这些值已经由 load_settings 加载
+        self.el_command_request.emit("CURR", str(self.el_current_spinbox.value()), False, "set_initial_curr")
         self.el_refresh_request.emit()
         self.el_connect_button.setEnabled(True)
         # 状态指示器将在刷新后更新
@@ -1197,16 +1272,16 @@ class UnifiedControllerGUI(QMainWindow):
         QMessageBox.critical(self, f"{device_name} - {title}", message)
 
     def closeEvent(self, event):
-        """主窗口关闭事件处理函数，确保设备安全断开。"""
+        """主窗口关闭事件处理函数，确保设备安全断开并保存设置。"""
         self.log_message("<font color='#666666'>正在关闭应用程序...</font>") # 普通日志颜色
         
-        # 尝试安全断开所有连接，无二次确认
         # 在关闭前停止任何激活的脉动动画
         if hasattr(self.ps_output_status_indicator, '_is_pulsing'):
             self.ps_output_status_indicator._is_pulsing = False
         if hasattr(self.el_input_status_indicator, '_is_pulsing'):
             self.el_input_status_indicator._is_pulsing = False
 
+        # 首先尝试安全断开所有连接，无二次确认
         if self.ps_worker and self.ps_worker._is_connected:
             self.log_message("<font color='#666666'>尝试安全关闭电源输出并断开连接...</font>") # 普通日志颜色
             self.ps_command_request.emit("OUTP", "OFF", False, "app_exit_cleanup")
@@ -1225,6 +1300,9 @@ class UnifiedControllerGUI(QMainWindow):
                 self.el_thread.quit()
                 self.el_thread.wait(2000)
 
+        # 保存用户设置
+        self.save_settings()
+
         if self.rm:
             try:
                 self.rm.close()
@@ -1236,11 +1314,11 @@ class UnifiedControllerGUI(QMainWindow):
         self.log_message("<font color='#666666'>应用程序已退出。</font>") # 普通日志颜色
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
- 
-    app.setAttribute(Qt.AA_EnableHighDpiScaling, True) 
-    app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    # 修正：将 setAttribute 移到 QApplication 创建之前
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True) 
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
+    app = QApplication(sys.argv)
     
     font = QFont("Microsoft YaHei UI", 10)
     app.setFont(font)
