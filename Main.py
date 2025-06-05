@@ -5,7 +5,8 @@ import os
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QGridLayout, QLabel, QLineEdit, QPushButton, QTextEdit,
-                             QDoubleSpinBox, QMessageBox, QGroupBox, QSizePolicy, QFrame)
+                             QDoubleSpinBox, QMessageBox, QGroupBox, QSizePolicy, QFrame,
+                             QDialog, QListWidget, QListWidgetItem) # 导入QDialog, QListWidget, QListWidgetItem
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, pyqtSlot, QTimer, QUrl, QSettings 
 from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent 
@@ -222,6 +223,115 @@ class DeviceWorker(QObject):
             err_msg = f"刷新 {self.device_name} 状态时发生未知错误: {e}"
             self.log_message_signal.emit(f"<font color='#DC3545'>错误:</font> {err_msg}") # 错误色
             self.error.emit(self.device_name, f"{self.device_name} 刷新错误", err_msg)
+
+# --- VISA 扫描对话框 ---
+class VisaScanDialog(QDialog):
+    def __init__(self, rm, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("扫描 VISA 资源")
+        self.setGeometry(200, 200, 600, 400)
+        self.rm = rm
+        self.selected_resource = None
+
+        self.init_ui()
+        self.apply_stylesheet()
+        self.scan_resources() # 自动扫描一次
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        self.resource_list_widget = QListWidget()
+        self.resource_list_widget.itemDoubleClicked.connect(self.accept) # 双击选择并关闭
+        layout.addWidget(self.resource_list_widget)
+
+        button_layout = QHBoxLayout()
+        self.scan_button = QPushButton("重新扫描")
+        self.scan_button.clicked.connect(self.scan_resources)
+        button_layout.addWidget(self.scan_button)
+
+        self.select_button = QPushButton("选择")
+        self.select_button.clicked.connect(self.on_select_clicked)
+        self.select_button.setEnabled(False) # 初始禁用，直到有选择
+        button_layout.addWidget(self.select_button)
+
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
+
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+        self.resource_list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+
+    def apply_stylesheet(self):
+        """为对话框应用样式，与主窗口保持一致。"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #F0F4F8;
+                color: #333333;
+            }
+            QListWidget {
+                background-color: #FFFFFF;
+                color: #333333;
+                border: 1px solid #B0C4DE;
+                border-radius: 5px;
+                padding: 5px;
+                font-size: 10pt;
+            }
+            QListWidget::item:selected {
+                background-color: #4682B4; /* 选中项背景色 */
+                color: white; /* 选中项文字颜色 */
+            }
+            QPushButton {
+                background-color: #4682B4; /* 按钮默认蓝色 (Steel Blue) */
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 8px 16px; /* 增加按钮内边距 */
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #5A9BD6;
+            }
+            QPushButton:pressed {
+                background-color: #3A6F9B;
+            }
+            QPushButton:disabled {
+                background-color: #AAAAAA;
+                color: #666666;
+            }
+        """)
+
+    def scan_resources(self):
+        """扫描可用的VISA资源并显示在列表中。"""
+        self.resource_list_widget.clear()
+        try:
+            resources = self.rm.list_resources()
+            if resources:
+                for r in resources:
+                    item = QListWidgetItem(r)
+                    self.resource_list_widget.addItem(item)
+            else:
+                self.resource_list_widget.addItem("未找到任何 VISA 资源。")
+        except Exception as e:
+            QMessageBox.critical(self, "扫描错误", f"扫描 VISA 资源时发生错误: {e}")
+            self.resource_list_widget.addItem(f"扫描错误: {e}")
+        self.on_selection_changed() # 更新选择按钮状态
+
+    def on_selection_changed(self):
+        """根据列表选择状态更新选择按钮的可用性。"""
+        self.select_button.setEnabled(len(self.resource_list_widget.selectedItems()) > 0)
+
+    def on_select_clicked(self):
+        """处理选择按钮点击事件，保存选中资源并接受对话框。"""
+        selected_items = self.resource_list_widget.selectedItems()
+        if selected_items:
+            self.selected_resource = selected_items[0].text()
+            self.accept()
+        else:
+            QMessageBox.warning(self, "无选择", "请从列表中选择一个 VISA 资源。")
 
 # --- 主GUI窗口 ---
 class UnifiedControllerGUI(QMainWindow):
@@ -457,33 +567,39 @@ class UnifiedControllerGUI(QMainWindow):
 
         # 电源连接区域
         connection_layout.addWidget(QLabel("电源 VISA 地址:"), 0, 0, Qt.AlignRight)
-        # 此时先用默认值初始化，稍后由 load_settings 填充
         self.ps_visa_entry = QLineEdit(self.DEFAULT_PS_VISA_RESOURCE) 
         connection_layout.addWidget(self.ps_visa_entry, 0, 1)
+        self.ps_browse_button = QPushButton("浏览...")
+        self.ps_browse_button.setFixedWidth(80) # 固定宽度
+        self.ps_browse_button.clicked.connect(lambda: self.browse_visa_resource(self.ps_visa_entry))
+        connection_layout.addWidget(self.ps_browse_button, 0, 2) # 新增浏览按钮
         self.ps_connect_button = QPushButton("连接电源")
         self.ps_connect_button.clicked.connect(self.toggle_ps_connection)
-        connection_layout.addWidget(self.ps_connect_button, 0, 2)
-        
+        connection_layout.addWidget(self.ps_connect_button, 0, 3) # 移动连接按钮
+
         self.ps_idn_label = QLabel("电源 IDN: 未连接")
-        connection_layout.addWidget(self.ps_idn_label, 1, 0, 1, 3) # 占据三列
+        connection_layout.addWidget(self.ps_idn_label, 1, 0, 1, 4) # 占据四列
 
         # 电子负载连接区域
         connection_layout.addWidget(QLabel("负载 VISA 地址:"), 2, 0, Qt.AlignRight)
-        # 此时先用默认值初始化，稍后由 load_settings 填充
         self.el_visa_entry = QLineEdit(self.DEFAULT_EL_VISA_RESOURCE) 
         connection_layout.addWidget(self.el_visa_entry, 2, 1)
+        self.el_browse_button = QPushButton("浏览...")
+        self.el_browse_button.setFixedWidth(80) # 固定宽度
+        self.el_browse_button.clicked.connect(lambda: self.browse_visa_resource(self.el_visa_entry))
+        connection_layout.addWidget(self.el_browse_button, 2, 2) # 新增浏览按钮
         self.el_connect_button = QPushButton("连接负载")
         self.el_connect_button.clicked.connect(self.toggle_el_connection)
-        connection_layout.addWidget(self.el_connect_button, 2, 2)
+        connection_layout.addWidget(self.el_connect_button, 2, 3) # 移动连接按钮
         
         self.el_idn_label = QLabel("电子负载 IDN: 未连接")
-        connection_layout.addWidget(self.el_idn_label, 3, 0, 1, 3)
+        connection_layout.addWidget(self.el_idn_label, 3, 0, 1, 4)
 
-        # VISA 资源扫描按钮
-        self.scan_visa_button = QPushButton("扫描 VISA 资源")
+        # VISA 资源扫描按钮 (保留用于全面日志输出)
+        self.scan_visa_button = QPushButton("扫描所有 VISA 资源 (至日志)")
         self.scan_visa_button.clicked.connect(self.scan_visa_resources)
-        connection_layout.addWidget(self.scan_visa_button, 4, 0, 1, 3) # 占据整行
-        
+        connection_layout.addWidget(self.scan_visa_button, 4, 0, 1, 4) # 占据整行
+
         connection_panel.setLayout(connection_layout)
         main_layout.addWidget(connection_panel)
 
@@ -760,7 +876,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.log_message(f"<font color='#666666'>播放音效: {os.path.basename(file_path)}</font>")
 
     def scan_visa_resources(self):
-        """扫描并列出所有可用的VISA资源。"""
+        """扫描并列出所有可用的VISA资源到日志。"""
         self.log_message("<font color='#17A2B8'>正在扫描可用的 VISA 资源...</font>") # 信息色
         try:
             resources = self.rm.list_resources()
@@ -768,13 +884,24 @@ class UnifiedControllerGUI(QMainWindow):
                 self.log_message("<font color='#28A745'>扫描完成！以下是可用的 VISA 资源:</font>") # 成功色
                 for r in resources:
                     self.log_message(f"  - <font color='#20B2AA'>{r}</font>") # 偏青色
-                self.log_message("<font color='#666666'>请将需要的地址复制到输入框中。</font>")
+                self.log_message("<font color='#666666'>请将需要的地址复制到输入框中，或使用 '浏览...' 按钮。</font>")
             else:
                 self.log_message("<font color='#FFC107'>未找到任何 VISA 资源。请确保 VISA 驱动已正确安装并设备已连接。</font>") # 警告色
         except Exception as e:
             self.log_message(f"<font color='#DC3545'>扫描 VISA 资源时发生错误: {e}</font>") # 错误色
             QMessageBox.critical(self, "VISA 扫描错误", 
                                  f"扫描 VISA 资源时发生错误: {e}\n\n请确认PyVISA后端已正确配置，并且设备驱动已安装。")
+
+    def browse_visa_resource(self, target_entry: QLineEdit):
+        """打开VISA扫描对话框，让用户选择资源。"""
+        dialog = VisaScanDialog(self.rm, self)
+        if dialog.exec_() == QDialog.Accepted:
+            if dialog.selected_resource:
+                target_entry.setText(dialog.selected_resource)
+                self.log_message(f"<font color='#666666'>已选择 VISA 资源:</font> <font color='#20B2AA'>{dialog.selected_resource}</font>")
+            else:
+                self.log_message("<font color='#FFC107'>警告:</font> 未选择任何 VISA 资源。")
+
 
     # --- 电源 (PS) 特定功能 ---
     def toggle_ps_connection(self):
@@ -793,6 +920,7 @@ class UnifiedControllerGUI(QMainWindow):
 
         self.ps_connect_button.setEnabled(False)
         self.ps_connect_button.setText("连接中...")
+        self.ps_browse_button.setEnabled(False) # 连接时禁用浏览按钮
         self.update_status_indicator(self.ps_output_status_indicator, "CONNECTING")
         self.ps_output_status_label.setText("连接中...")
 
@@ -828,6 +956,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.ps_idn_label.setText(f"电源 IDN: {idn}")
         self.ps_connect_button.setText("断开电源")
         self.ps_visa_entry.setEnabled(False)
+        self.ps_browse_button.setEnabled(False) # 连接后禁用浏览按钮
         self.set_ps_controls_enabled(True)
         # 初始设定并刷新状态
         # 这些操作现在通过信号发送到工作线程，避免GUI阻塞
@@ -863,6 +992,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.ps_connect_button.setText("连接电源")
         self.ps_connect_button.setEnabled(True)
         self.ps_visa_entry.setEnabled(True)
+        self.ps_browse_button.setEnabled(True) # 断开后启用浏览按钮
         self.set_ps_controls_enabled(False)
         self.update_status_indicator(self.ps_output_status_indicator, "UNKNOWN")
         self.ps_output_status_label.setText("未知")
@@ -1053,6 +1183,7 @@ class UnifiedControllerGUI(QMainWindow):
         
         self.el_connect_button.setEnabled(False)
         self.el_connect_button.setText("连接中...")
+        self.el_browse_button.setEnabled(False) # 连接时禁用浏览按钮
         self.update_status_indicator(self.el_input_status_indicator, "CONNECTING")
         self.el_input_status_label.setText("连接中...")
 
@@ -1087,6 +1218,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.el_idn_label.setText(f"电子负载 IDN: {idn}")
         self.el_connect_button.setText("断开负载")
         self.el_visa_entry.setEnabled(False)
+        self.el_browse_button.setEnabled(False) # 连接后禁用浏览按钮
         self.set_el_controls_enabled(True)
         # 初始设定并刷新状态
         # 使用UI中的值进行初始化，这些值已经由 load_settings 加载
@@ -1118,6 +1250,7 @@ class UnifiedControllerGUI(QMainWindow):
         self.el_connect_button.setText("连接负载")
         self.el_connect_button.setEnabled(True)
         self.el_visa_entry.setEnabled(True)
+        self.el_browse_button.setEnabled(True) # 断开后启用浏览按钮
         self.set_el_controls_enabled(False)
         self.update_status_indicator(self.el_input_status_indicator, "UNKNOWN")
         self.el_input_status_label.setText("未知")
